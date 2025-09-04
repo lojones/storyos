@@ -1,0 +1,135 @@
+{
+  "id": "campus_freshman",
+  "name": "Campus Freshman",
+  "description": "Experience your first year at McMaster University. Navigate academics, make friends, and discover who you want to become in this slice-of-life university adventure.",
+  "version": "1.0.0",
+  "setting": {
+    "world": "McMaster University, Hamilton, Ontario, Canada",
+    "location": "Modern Canadian university campus",
+    "time_period": "Present day, Fall 2025 semester",
+    "cultural_context": "Canadian university life, multicultural campus environment",
+    "key_locations": [
+      "Student Centre",
+      "Burke Science Building", 
+      "Hamilton Hall dormitories",
+      "Mills Memorial Library",
+      "West Quad"
+    ]
+  },
+  "dm_behavior": {
+    "tone": "warm and encouraging with realistic challenges",
+    "pacing": "moderate",
+    "description_style": "detailed with sensory immersion",
+    "interaction_style": "realistic",
+    "special_instructions": [
+      "Focus on authentic university experiences",
+      "Include Canadian cultural references naturally",
+      "Balance academic pressure with social growth",
+      "Show consequences of time management choices",
+      "Encourage character development and self-discovery"
+    ]
+  },
+  "safety": {
+    "sfw_lock": false,
+    "content_boundaries": [
+      "No graphic violence",
+      "Age-appropriate romantic content only",
+      "Realistic but not excessive substance references"
+    ],
+    "trigger_warnings": [
+      "Academic stress",
+      "Social anxiety",
+      "Family expectations"
+    ],
+    "age_rating": "teen"
+  },
+  "mechanics": {
+    "time_advancement": "flexible",
+    "consequence_system": "grades_stress_relationships",
+    "choice_structure": "open_ended",
+    "skill_checks": false,
+    "inventory_management": true
+  },
+  "initial_state": {
+    "current_location": "Hamilton Hall - Dorm Room 312",
+    "current_time": "2025-09-01T09:00:00-04:00",
+    "protagonist": {
+      "name": "Protagonist",
+      "role": "First-year student",
+      "current_status": "Excited and nervous about starting university",
+      "traits": [
+        "curious",
+        "determined", 
+        "slightly anxious",
+        "eager to learn"
+      ],
+      "relationships": {},
+      "inventory": [
+        "laptop",
+        "orientation package",
+        "student ID card",
+        "textbooks",
+        "laundry basket",
+        "family photo"
+      ],
+      "goals": [
+        "Make friends and connections",
+        "Maintain good grades",
+        "Join clubs or activities",
+        "Declare a major by end of year",
+        "Manage stress and workload"
+      ]
+    },
+    "npcs": {
+      "Alex": {
+        "name": "Alex",
+        "role": "Roommate",
+        "current_status": "Friendly second-year student helping with orientation",
+        "traits": [
+          "outgoing",
+          "helpful",
+          "organized",
+          "sciences major"
+        ],
+        "relationships": {},
+        "inventory": [
+          "chemistry textbooks",
+          "lab notebook",
+          "coffee maker",
+          "campus map"
+        ],
+        "goals": [
+          "Help roommate adjust",
+          "Maintain GPA for grad school",
+          "Lead chemistry study group"
+        ]
+      }
+    },
+    "academic_status": {
+      "gpa": 0.0,
+      "credits": 0,
+      "semester": "Fall 2025",
+      "major": "Undecided",
+      "courses": [
+        "Introduction to Psychology",
+        "English Literature Survey", 
+        "Mathematics for Social Sciences",
+        "Introduction to Philosophy",
+        "First-Year Seminar"
+      ]
+    },
+    "stress_level": 25,
+    "energy_level": 85,
+    "mood": "optimistic but nervous"
+  },
+  "tags": [
+    "university",
+    "slice_of_life",
+    "coming_of_age",
+    "realistic",
+    "canada",
+    "freshman_year"
+  ],
+  "author": "StoryOS Team",
+  "created_at": "2025-09-02T12:00:00-04:00"
+}

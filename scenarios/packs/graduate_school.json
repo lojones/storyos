@@ -1,0 +1,161 @@
+{
+  "id": "graduate_school",
+  "name": "Graduate School Journey", 
+  "description": "Navigate the challenges of graduate school life. Balance research, teaching responsibilities, thesis work, and personal relationships while pursuing your academic dreams.",
+  "version": "1.0.0",
+  "setting": {
+    "world": "Major research university",
+    "location": "Graduate campus with research facilities",
+    "time_period": "Present day, second year of PhD program",
+    "cultural_context": "Academic research environment",
+    "key_locations": [
+      "Research lab",
+      "Graduate student office",
+      "Seminar rooms",
+      "University library",
+      "Faculty offices",
+      "Graduate student lounge"
+    ]
+  },
+  "dm_behavior": {
+    "tone": "intellectually challenging with realistic pressures",
+    "pacing": "slow_burn",
+    "description_style": "detailed academic atmosphere",
+    "interaction_style": "realistic",
+    "special_instructions": [
+      "Emphasize research challenges and breakthroughs",
+      "Include imposter syndrome and self-doubt",
+      "Show mentor-student relationship dynamics",
+      "Balance work-life integration struggles",
+      "Include academic conference and publishing pressures"
+    ]
+  },
+  "safety": {
+    "sfw_lock": false,
+    "content_boundaries": [
+      "Realistic academic stress without excessive anxiety triggers",
+      "Professional relationships maintained appropriately",
+      "No exploitation of power dynamics"
+    ],
+    "trigger_warnings": [
+      "Imposter syndrome",
+      "Academic pressure and burnout",
+      "Financial stress",
+      "Work-life balance challenges"
+    ],
+    "age_rating": "adult"
+  },
+  "mechanics": {
+    "time_advancement": "scene_based",
+    "consequence_system": "research_progress_relationships_wellbeing",
+    "choice_structure": "open_ended",
+    "skill_checks": false,
+    "inventory_management": true
+  },
+  "initial_state": {
+    "current_location": "Graduate Research Lab - Workstation 7",
+    "current_time": "2025-09-02T14:30:00-04:00",
+    "protagonist": {
+      "name": "Protagonist",
+      "role": "PhD candidate in Computer Science",
+      "current_status": "Second-year graduate student working on machine learning thesis",
+      "traits": [
+        "analytically minded",
+        "perfectionist tendencies",
+        "intellectually curious",
+        "prone to overthinking",
+        "resilient"
+      ],
+      "relationships": {},
+      "inventory": [
+        "high-end laptop",
+        "research notebooks",
+        "academic papers (stack)",
+        "coffee cup (usually empty)",
+        "stress ball",
+        "university ID card",
+        "thesis draft (multiple revisions)"
+      ],
+      "goals": [
+        "Complete thesis research successfully",
+        "Publish in top-tier conference",
+        "Maintain advisor relationship",
+        "Secure postdoc position",
+        "Pass comprehensive exams",
+        "Maintain mental health and relationships"
+      ]
+    },
+    "npcs": {
+      "Dr. Chen": {
+        "name": "Dr. Chen",
+        "role": "PhD thesis advisor",
+        "current_status": "Accomplished professor with high standards",
+        "traits": [
+          "brilliant researcher",
+          "demanding but fair",
+          "internationally recognized",
+          "busy with multiple projects"
+        ],
+        "relationships": {},
+        "inventory": [
+          "latest research papers",
+          "grant applications",
+          "conference invitations",
+          "student evaluations"
+        ],
+        "goals": [
+          "Mentor successful PhD students",
+          "Maintain research funding",
+          "Publish groundbreaking research"
+        ]
+      },
+      "Sam": {
+        "name": "Sam",
+        "role": "Fellow PhD student and office mate",
+        "current_status": "Fourth-year student finishing dissertation",
+        "traits": [
+          "experienced",
+          "cynical but caring",
+          "good at work-life balance",
+          "studies theoretical CS"
+        ],
+        "relationships": {},
+        "inventory": [
+          "dissertation chapters",
+          "job market materials",
+          "conference presentation slides",
+          "emergency snacks"
+        ],
+        "goals": [
+          "Complete dissertation defense",
+          "Secure academic position",
+          "Support younger grad students"
+        ]
+      }
+    },
+    "academic_status": {
+      "program_year": 2,
+      "credits_completed": 45,
+      "gpa": 3.8,
+      "comprehensive_exams": "scheduled for next semester",
+      "thesis_progress": "20% complete",
+      "publications": 1,
+      "conferences_attended": 3,
+      "research_area": "Machine Learning and Natural Language Processing"
+    },
+    "stress_level": 65,
+    "energy_level": 55,
+    "mood": "focused but tired"
+  },
+  "tags": [
+    "graduate_school",
+    "academia",
+    "research",
+    "phd_life",
+    "adult",
+    "intellectual",
+    "challenging"
+  ],
+  "author": "StoryOS Team",
+  "created_at": "2025-09-02T13:00:00-04:00"
+}
