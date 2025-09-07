@@ -16,8 +16,6 @@ class Character(BaseModel):
     inventory: List[str] = Field(default_factory=list)
     goals: List[str] = Field(default_factory=list)
     recent_changes: List[str] = Field(default_factory=list)
-    sfw_level: str = "sfw"
-    mature_pointer: Optional[str] = None
 
 class Event(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -30,8 +28,6 @@ class Event(BaseModel):
     dm_outcome: str
     consequences: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
-    sfw_level: str = "sfw"
-    mature_pointer: Optional[str] = None
     notes: Optional[str] = None
 
 class Phase(BaseModel):
@@ -47,8 +43,6 @@ class World(BaseModel):
     rules_mechanics: List[str] = Field(default_factory=list)
     ongoing_plots: List[str] = Field(default_factory=list)
     global_changes: List[str] = Field(default_factory=list)
-    sfw_level: str = "sfw"
-    mature_pointer: Optional[str] = None
 
 class CurrentScenario(BaseModel):
     location: str
@@ -58,8 +52,6 @@ class CurrentScenario(BaseModel):
     open_choices: List[str] = Field(default_factory=list)
     last_exchange_ref: Optional[str] = None
     prompt: str = "What do you do next?"
-    sfw_level: str = "sfw"
-    mature_pointer: Optional[str] = None
 
 class Policy(BaseModel):
     sfw_mode: bool = True

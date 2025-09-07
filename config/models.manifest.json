@@ -1,0 +1,44 @@
+{
+  "providers": [
+    {
+      "provider": "xai",
+      "model": "grok-4",
+      "caps": {
+        "allows_explicit_adult_text": true,
+        "json_mode_strict": false,
+        "supports_streaming": true,
+        "max_output_tokens": 4096,
+        "tool_use": false,
+        "cost_rank": 3,
+        "latency_rank": 2
+      }
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "caps": {
+        "allows_explicit_adult_text": false,
+        "json_mode_strict": true,
+        "supports_streaming": true,
+        "max_output_tokens": 4096,
+        "tool_use": true,
+        "cost_rank": 2,
+        "latency_rank": 2
+      }
+    },
+    {
+      "provider": "mistral",
+      "model": "mistral-large-latest",
+      "caps": {
+        "allows_explicit_adult_text": false,
+        "json_mode_strict": "medium",
+        "supports_streaming": true,
+        "max_output_tokens": 4096,
+        "tool_use": false,
+        "cost_rank": 1,
+        "latency_rank": 1
+      }
+    }
+  ]
+}
+

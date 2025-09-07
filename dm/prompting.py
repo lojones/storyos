@@ -1,54 +1,23 @@
 import json
 from typing import Dict, Any
+from pathlib import Path
 from dm.models import Scenario, GameState, Chronicle
 
 
-BASE_SYSTEM_PROMPT = """You are the Story Orchestrator (Dungeon Master) for storyOS, an interactive narrative system.
+_PROMPT_PATH = Path(__file__).resolve().parent.parent / "config" / "system_prompt.md"
 
-CORE RESPONSIBILITIES:
-- Follow the active SCENARIO's dm_behavior, safety constraints, and mechanics exactly
-- Maintain story continuity using the provided game state
-- Create engaging, immersive experiences focused on university life
-- Return responses in the exact JSON format specified
+def load_system_prompt() -> str:
+    """Load the base system prompt from a Markdown file.
 
-OUTPUT FORMAT (JSON only):
-{
-    "narrative": "Your story response (100-250 words unless player requests otherwise)",
-    "suggested_actions": ["Action 1", "Action 2", "Action 3"],
-    "state_patch": {"field": "value", "nested": {"field": "value"}},
-    "scene_tags": ["mood", "themes", "categories"],
-    "meta": {"image_prompt": "optional image generation prompt"}
-}
-
-NARRATIVE GUIDELINES:
-- Write in second person ("You walk into...")  
-- Focus on sensory details and university atmosphere
-- Advance time appropriately (30-90 minutes typically)
-- Include NPCs naturally and give them personality
-- End with a clear prompt for the next player action
-- Reflect consequences of previous choices
-
-STATE MANAGEMENT:
-- Update relevant state fields in state_patch
-- Track relationships, stress, energy, academic progress
-- Reflect time passage and location changes
-- Update NPC statuses and availability
-- Maintain inventory and goal tracking
-
-UNIVERSITY LIFE FOCUS:
-- Emphasize realistic campus experiences
-- Include academic pressures, social dynamics, personal growth
-- Reference real locations (McMaster University setting)
-- Balance study/social/personal time realistically
-- Show consequences of academic and social choices
-
-SAFETY AND CONTENT:
-- Strictly follow scenario safety constraints
-- Respect SFW locks and content boundaries
-- Handle mature themes appropriately based on settings
-- Provide trigger warnings when required by scenario
-
-Remember: You are scenario-agnostic. All behavior, tone, and constraints come from the active scenario."""
+    Falls back to a minimal instruction if the file is missing.
+    """
+    try:
+        return _PROMPT_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        return (
+            "You are the Story Orchestrator (Dungeon Master) for storyOS. "
+            "Follow the active scenario and return ONLY the requested output format."
+        )
 
 
 def build_scenario_context(scenario: Scenario) -> str:
@@ -149,7 +118,7 @@ def build_full_prompt(scenario: Scenario, game_state: GameState,
     """Build the complete prompt for the LLM."""
     
     # System prompt (scenario-agnostic)
-    system_prompt = BASE_SYSTEM_PROMPT
+    system_prompt = load_system_prompt()
     
     # User prompt with scenario and state context  
     scenario_context = build_scenario_context(scenario)
@@ -171,6 +140,78 @@ GLOBAL CONSTRAINTS:
 PLAYER MESSAGE: {player_message}"""
     
     return system_prompt, user_prompt
+
+
+def build_narrative_only_prompt(
+    scenario: Scenario,
+    game_state: GameState,
+    player_message: str,
+    chronicle: Chronicle = None,
+) -> tuple[str, str]:
+    """Build prompts to get ONLY the creative narrative text (no JSON)."""
+    scenario_context = build_scenario_context(scenario)
+    state_context = build_state_context(game_state, chronicle)
+    system_prompt = (
+        "You are the Dungeon Master narrating an immersive scene. "
+        "Respond with ONLY the narrative prose, 150–300 words, second person, vivid and engaging. "
+        "Do NOT include JSON, tags, code fences, or additional formatting."
+    )
+    user_prompt = f"""ACTIVE SCENARIO:
+{scenario_context}
+
+CURRENT STATE (read-only):
+{state_context}
+
+PLAYER MESSAGE: {player_message}
+
+Return ONLY narrative text, nothing else."""
+    return system_prompt, user_prompt
+
+
+def build_structured_followup_prompt(
+    scenario: Scenario,
+    game_state: GameState,
+    player_message: str,
+    narrative_text: str,
+    chronicle: Chronicle = None,
+) -> tuple[str, str, dict]:
+    """Build a follow-up prompt to produce a DMResponse JSON using the already generated narrative."""
+    scenario_context = build_scenario_context(scenario)
+    state_context = build_state_context(game_state, chronicle)
+    system_prompt = (
+        "You are a strict JSON generator. Given scenario and the DM narrative text, "
+        "produce a JSON object adhering to the exact schema. Return ONLY JSON."
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "narrative": {"type": "string", "minLength": 10},
+            "suggested_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 4,
+            },
+            "state_patch": {"type": "object"},
+            "scene_tags": {"type": "array", "items": {"type": "string"}},
+            "meta": {"type": "object"},
+        },
+        "required": ["narrative", "suggested_actions", "state_patch", "scene_tags", "meta"],
+        "additionalProperties": False,
+    }
+    user_prompt = f"""ACTIVE SCENARIO:
+{scenario_context}
+
+CURRENT STATE (read-only):
+{state_context}
+
+PLAYER MESSAGE: {player_message}
+
+DM NARRATIVE (text you already wrote; use as 'narrative' in the JSON):
+{narrative_text}
+
+Return ONLY a JSON object matching the schema."""
+    return system_prompt, user_prompt, schema
 
 
 def extract_chronicle_summary(chronicle: Chronicle, max_events: int = 10) -> Dict[str, Any]:

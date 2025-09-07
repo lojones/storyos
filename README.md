@@ -15,12 +15,6 @@ A Streamlit-powered interactive storytelling application featuring scenario-defi
 - **World State**: Maintains setting, rules, and ongoing plot threads
 - **Current Scenario**: Real-time snapshot for seamless story continuation
 
-### 🔒 Mature Content Handling
-- **Flexible Content Policies**: Support for SFW, reference-based, and inline content modes
-- **Encrypted Vault System**: Secure storage of mature content with AES-256-GCM encryption
-- **Age Verification**: Configurable content gates based on user verification
-- **Scenario Safety Locks**: Scenarios can enforce their own content boundaries
-
 ### 💬 Rich Chat Interface
 - **Streaming Responses**: Real-time story generation with visual feedback
 - **Suggested Actions**: Context-aware action buttons for easy interaction
@@ -66,10 +60,12 @@ Configure these in `.env` or `.streamlit/secrets.toml`:
 |----------|-------------|----------|
 | `XAI_API_KEY` | Your X.AI API key (for Grok) | Yes* |
 | `OPENAI_API_KEY` | Your OpenAI API key (alternative) | Yes* |
+| `MISTRAL_API_KEY` | Your Mistral API key (optional) | No |
 | `XAI_BASE_URL` | X.AI API base URL (default: https://api.x.ai/v1) | No |
 | `OPENAI_BASE_URL` | OpenAI API base URL (default: https://api.openai.com/v1) | No |
+| `MISTRAL_BASE_URL` | OpenAI-compatible base URL for Mistral | No |
 | `DEFAULT_MODEL` | LLM model to use (default: grok-beta) | No |
-| `CHRONICLE_ENCRYPTION_KEY` | 32-byte hex key for mature content encryption | No** |
+| `STORYOS_AES_KEY` | 32-byte base64 key for AES-256-GCM vault | No** |
 
 *Either XAI_API_KEY or OPENAI_API_KEY is required
 **Required only if using mature content with encryption
@@ -195,6 +191,12 @@ Control how the game systems work:
   \"inventory_management\": true         // Whether to track items
 }
 ```
+
+### Admin UI (Create/Import/Export)
+
+- Open the sidebar and expand "🛠️ Admin: Scenarios"
+- Import a `.json` or `.yaml` scenario (validated)
+- Or edit JSON from a template and save into `scenarios/packs/`
 
 ### Example: Creating a New Scenario
 

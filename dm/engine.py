@@ -5,16 +5,32 @@ from typing import Dict, Any, Optional, List, Tuple
 import logging
 
 from .models import GameState, DMResponse, Scenario, Chronicle, Event, CurrentScenario
-from .prompting import build_full_prompt, validate_dm_response_schema
+from .prompting import (
+    build_full_prompt,
+    validate_dm_response_schema,
+    build_narrative_only_prompt,
+    build_structured_followup_prompt,
+)
 from memory.chronicle import ChronicleManager
 from services.llm import LLMService
+import os
+from services.providers.xai_grok import XaiGrokProvider
+from services.providers.openai_chat import OpenAIChatProvider
 
 logger = logging.getLogger(__name__)
 
 
 class GameEngine:
-    def __init__(self, llm_service: LLMService, chronicle_manager: ChronicleManager):
+    def __init__(self, llm_service: LLMService | None, chronicle_manager: ChronicleManager, provider: XaiGrokProvider | None = None, cheap_provider: OpenAIChatProvider | None = None):
         self.llm = llm_service
+        # Big creative LLM (default to x.ai Grok)
+        self.big = provider or XaiGrokProvider(model="grok-4")
+        # Quick/cheap LLM for auxiliary tasks
+        if cheap_provider is not None:
+            self.cheap = cheap_provider
+        else:
+            # Cheap/quick default: x.ai grok-3-mini
+            self.cheap = XaiGrokProvider(model="grok-3-mini")
         self.chronicle_manager = chronicle_manager
     
     def process_turn(self, 
@@ -30,16 +46,39 @@ class GameEngine:
         try:
             # Build prompts
             system_prompt, user_prompt = build_full_prompt(scenario, game_state, player_message, chronicle)
-            
-            # Get LLM response
-            raw_response = self.llm.generate_dm_response(
-                system_prompt=system_prompt,
-                scenario_context="",  # Already included in user_prompt
-                game_state="",       # Already included in user_prompt  
-                player_message=user_prompt,
-                model=model,
-                temperature=0.8
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            # Call big provider; prefer JSON mode when available
+            raw_response = self.big.generate(
+                messages,
+                temperature=0.8,
+                max_tokens=1000,
+                response_format_json=True,
+                stream=False,
             )
+
+            # Handle non-JSON payloads with one retry and a repair attempt
+            if isinstance(raw_response, dict) and ("error" in raw_response or "raw" in raw_response):
+                # Retry once with a stricter reminder
+                retry_messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt + "\n\nReturn ONLY a valid JSON object as specified."},
+                ]
+                raw_response = self.big.generate(
+                    retry_messages,
+                    temperature=0.6,
+                    max_tokens=900,
+                    response_format_json=True,
+                    stream=False,
+                )
+
+            if not isinstance(raw_response, dict):
+                # Final repair attempt: wrap minimal contract
+                raw_response = self._create_fallback_response("non_json_payload")
             
             # Validate response schema
             is_valid, error_msg = validate_dm_response_schema(raw_response)
@@ -48,6 +87,12 @@ class GameEngine:
                 raw_response = self._create_fallback_response(error_msg)
             
             dm_response = DMResponse(**raw_response)
+
+            # Sanitize any image prompt (PG-13) using the cheap LLM
+            if dm_response.meta and dm_response.meta.get("image_prompt"):
+                dm_response.meta["image_prompt"] = self._sanitize_image_prompt_llm(
+                    dm_response.meta.get("image_prompt", "")
+                )
             
             # Update game state
             updated_game_state = self._apply_state_patch(game_state, dm_response.state_patch, scenario)
@@ -68,6 +113,155 @@ class GameEngine:
             logger.error(f"Error processing turn: {e}")
             fallback_response = self._create_error_response(str(e))
             return DMResponse(**fallback_response), game_state, chronicle
+
+    def process_turn_two_stage(
+        self,
+        scenario: Scenario,
+        game_state: GameState,
+        chronicle: Chronicle,
+        player_message: str,
+    ) -> Tuple[DMResponse, GameState, Chronicle]:
+        """Two-stage flow: 1) creative narrative, 2) structured JSON.
+
+        Stage 1 returns the narrative only (higher temperature). Stage 2 returns
+        the structured fields. We combine them and then apply state/chronicle updates.
+        """
+        try:
+            narrative_text = self.generate_narrative_text(scenario, game_state, chronicle, player_message)
+            return self.complete_structured_with_narrative(
+                scenario, game_state, chronicle, player_message, narrative_text
+            )
+        except Exception as e:
+            logger.error(f"Two-stage turn error: {e}")
+            fallback = self._create_error_response(str(e))
+            return DMResponse(**fallback), game_state, chronicle
+
+    def generate_narrative_text(
+        self,
+        scenario: Scenario,
+        game_state: GameState,
+        chronicle: Chronicle,
+        player_message: str,
+    ) -> str:
+        sys1, usr1 = build_narrative_only_prompt(scenario, game_state, player_message, chronicle)
+        messages1 = [{"role": "system", "content": sys1}, {"role": "user", "content": usr1}]
+        resp1 = self.big.generate(
+            messages1,
+            temperature=0.9,
+            max_tokens=800,
+            response_format_json=False,
+            stream=False,
+        )
+        if isinstance(resp1, dict):
+            narrative_text = resp1.get("raw") or ""
+        else:
+            narrative_text = str(resp1)
+        if not isinstance(narrative_text, str) or not narrative_text.strip():
+            narrative_text = "The story continues..."
+        return narrative_text
+
+    def stream_narrative_text(
+        self,
+        scenario: Scenario,
+        game_state: GameState,
+        chronicle: Chronicle,
+        player_message: str,
+        temperature: float = 0.9,
+        max_tokens: int = 800,
+    ):
+        """Yield narrative text chunks for streaming."""
+        sys1, usr1 = build_narrative_only_prompt(scenario, game_state, player_message, chronicle)
+        messages1 = [{"role": "system", "content": sys1}, {"role": "user", "content": usr1}]
+        stream = self.big.generate(
+            messages1,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format_json=False,
+            stream=True,
+        )
+        try:
+            for chunk in stream:
+                if not chunk:
+                    continue
+                yield chunk
+        except Exception as e:
+            logger.error(f"Streaming narrative failed: {e}")
+
+    def complete_structured_with_narrative(
+        self,
+        scenario: Scenario,
+        game_state: GameState,
+        chronicle: Chronicle,
+        player_message: str,
+        narrative_text: str,
+    ) -> Tuple[DMResponse, GameState, Chronicle]:
+        sys2, usr2, schema = build_structured_followup_prompt(
+            scenario, game_state, player_message, narrative_text, chronicle
+        )
+        messages2 = [{"role": "system", "content": sys2}, {"role": "user", "content": usr2}]
+        raw2 = self.big.generate(
+            messages2,
+            temperature=0.3,
+            max_tokens=1000,
+            response_format_json=True,
+            stream=False,
+        )
+        if not isinstance(raw2, dict):
+            raw2 = {"raw": str(raw2)}
+        if "raw" in raw2 and isinstance(raw2["raw"], str):
+            import json as _json
+            try:
+                raw2 = _json.loads(raw2["raw"])
+            except Exception:
+                raw2 = {}
+        if isinstance(raw2, dict):
+            raw2["narrative"] = narrative_text
+            raw2 = self._coerce_dm_response(raw2, narrative_text, chronicle)
+        is_valid, error_msg = validate_dm_response_schema(raw2)
+        if not is_valid:
+            logger.error(f"Invalid DM response schema (two-stage): {error_msg}")
+            raw2 = self._create_fallback_response(error_msg)
+            raw2["narrative"] = narrative_text
+        dm_response = DMResponse(**raw2)
+        updated_game_state = self._apply_state_patch(game_state, dm_response.state_patch, scenario)
+        updated_chronicle = self._update_chronicle(
+            chronicle, player_message, dm_response, updated_game_state, scenario
+        )
+        return dm_response, updated_game_state, updated_chronicle
+
+    def _coerce_dm_response(self, raw: Dict[str, Any], narrative_text: str, chronicle: Chronicle | None) -> Dict[str, Any]:
+        """Fill missing required fields with sensible defaults to satisfy schema."""
+        try:
+            out: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+            # narrative
+            if not isinstance(out.get("narrative"), str) or len(out.get("narrative", "").strip()) < 10:
+                nt = (narrative_text or "").strip()
+                out["narrative"] = nt if len(nt) >= 10 else (nt + " The story continues...")
+            # suggested_actions
+            sa = out.get("suggested_actions")
+            if not isinstance(sa, list) or len(sa) == 0 or not all(isinstance(x, str) and x.strip() for x in sa):
+                choices = []
+                try:
+                    if chronicle and chronicle.current and chronicle.current.open_choices:
+                        choices = list(chronicle.current.open_choices)[:3]
+                except Exception:
+                    choices = []
+                if not choices:
+                    choices = ["Continue forward", "Look around", "Ask a question"]
+                out["suggested_actions"] = choices
+            # state_patch
+            if not isinstance(out.get("state_patch"), dict):
+                out["state_patch"] = {}
+            # scene_tags
+            stags = out.get("scene_tags")
+            if not isinstance(stags, list):
+                out["scene_tags"] = ["general"]
+            # meta
+            if not isinstance(out.get("meta"), dict):
+                out["meta"] = {}
+            return out
+        except Exception:
+            return raw
     
     def _apply_state_patch(self, 
                           current_state: GameState, 
@@ -383,8 +577,47 @@ class GameEngine:
             "scene_tags": ["system_error"],
             "meta": {"processing_error": error_msg}
         }
+
+    def _sanitize_image_prompt_llm(self, prompt: str) -> str:
+        if not prompt:
+            return ""
+        sys = (
+            "You clean and neutralize image prompts to be PG-13 and safe. "
+            "Enforce: no full nudity, explicit pornographic content, graphic violence, gore, or brand text. "
+            "Keep the scene intent but make it suitable for a general audience. "
+            "Return JSON only: {\"image_prompt\": \"sanitized prompt\"}."
+        )
+        user = (
+            "Sanitize this image prompt for PG-13 use. Include helpful stylistic hints "
+            "like 'realistic, natural color, soft natural light, medium shot, eye level'.\n\n"
+            f"PROMPT:\n{prompt}"
+        )
+        messages = [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": user},
+        ]
+        resp = self.cheap.generate(
+            messages,
+            temperature=0.3,
+            max_tokens=200,
+            response_format_json=True,
+            stream=False,
+        )
+        try:
+            if isinstance(resp, dict):
+                if "image_prompt" in resp and isinstance(resp["image_prompt"], str):
+                    return resp["image_prompt"].strip()
+                if "raw" in resp:
+                    import json as _json
+                    data = _json.loads(resp["raw"])  # may raise
+                    if isinstance(data, dict) and isinstance(data.get("image_prompt"), str):
+                        return data["image_prompt"].strip()
+        except Exception:
+            pass
+        # Fallback: prefix PG-13 tag without explicit keyword scanning
+        return f"PG-13, {prompt.strip()}, realistic, natural color, soft natural light, medium shot, eye level"
     
-    def initialize_new_game(self, scenario: Scenario) -> Tuple[GameState, Chronicle]:
+    def initialize_new_game(self, scenario: Scenario, story_label: Optional[str] = None) -> Tuple[GameState, Chronicle]:
         """Initialize a new game with the given scenario."""
         
         # Create initial game state from scenario
@@ -401,11 +634,12 @@ class GameEngine:
         )
         
         # Create chronicle
-        from memory.chronicle import Policy
+        from dm.models import Policy
+        # Always allow inline mature content; no checks
         policy = Policy(
-            sfw_mode=scenario.safety.sfw_lock,
-            mature_handling="redact" if scenario.safety.sfw_lock else "reference",
-            age_verified=False
+            sfw_mode=False,
+            mature_handling="inline_if_allowed",
+            age_verified=True,
         )
         
         chronicle = self.chronicle_manager.create_chronicle(scenario.id, initial_current, policy)
@@ -421,6 +655,8 @@ class GameEngine:
             "ongoing_plots": ["Story beginning"],
             "global_changes": [f"Game started at {datetime.now().isoformat()}"]
         }
+        if story_label:
+            world_updates.setdefault("global_changes", []).append(f"Story name: {story_label}")
         
         chronicle = self.chronicle_manager.persist_world_update(chronicle, world_updates)
         
