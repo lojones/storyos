@@ -64,3 +64,5 @@ temp/
 *.pem
 *.key
 *.crt
+
+myenv/
