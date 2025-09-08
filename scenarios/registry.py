@@ -3,6 +3,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+from datetime import datetime
 
 from .schema import ScenarioSchema, validate_scenario_dict, ScenarioValidationError
 from dm.models import Scenario
@@ -51,7 +52,7 @@ class ScenarioRegistry:
                 else:  # yaml
                     data = yaml.safe_load(f)
             
-            # Validate against schema
+            # Validate against simplified schema
             validated_scenario = validate_scenario_dict(data)
             
             # Convert to internal Scenario model
@@ -71,69 +72,56 @@ class ScenarioRegistry:
             raise
     
     def _schema_to_scenario(self, schema: ScenarioSchema) -> Scenario:
-        """Convert a validated schema to internal Scenario model."""
+        """Convert simplified schema to internal Scenario model with sensible defaults."""
         from dm.models import (
             DMBehavior, SafetyConstraints, ScenarioMechanics,
             GameState, Character, Relationship
         )
         
-        # Convert DM behavior
+        # Map simplified freeform behaviour into structured DMBehavior defaults
         dm_behavior = DMBehavior(
-            tone=schema.dm_behavior.tone,
-            pacing=schema.dm_behavior.pacing,
-            description_style=schema.dm_behavior.description_style,
-            interaction_style=schema.dm_behavior.interaction_style,
-            special_instructions=schema.dm_behavior.special_instructions
+            tone="grounded",
+            pacing="moderate",
+            description_style="detailed",
+            interaction_style="realistic",
+            special_instructions=[schema.dungeon_master_behaviour]
         )
         
-        # Convert safety constraints
         safety = SafetyConstraints(
-            sfw_lock=schema.safety.sfw_lock,
-            content_boundaries=schema.safety.content_boundaries,
-            trigger_warnings=schema.safety.trigger_warnings
+            sfw_lock=False,
+            content_boundaries=[],
+            trigger_warnings=[],
         )
         
-        # Convert mechanics
         mechanics = ScenarioMechanics(
-            time_advancement=schema.mechanics.time_advancement,
-            consequence_system=schema.mechanics.consequence_system,
-            choice_structure=schema.mechanics.choice_structure
+            time_advancement="flexible",
+            consequence_system="grades_stress_relationships",
+            choice_structure="open_ended",
         )
         
-        # Convert initial state
+        # Initial state derived from simplified fields
         protagonist = Character(
-            name=schema.initial_state.protagonist.name,
-            role=schema.initial_state.protagonist.role,
-            current_status=schema.initial_state.protagonist.current_status,
-            traits=schema.initial_state.protagonist.traits,
-            relationships={
-                k: Relationship(**v) for k, v in schema.initial_state.protagonist.relationships.items()
-            },
-            inventory=schema.initial_state.protagonist.inventory,
-            goals=schema.initial_state.protagonist.goals
+            name=schema.player_name,
+            role=schema.role,
+            current_status="Starting their journey",
+            traits=[],
+            relationships={},
+            inventory=[],
+            goals=[],
         )
-        
-        npcs = {}
-        for npc_name, npc_data in schema.initial_state.npcs.items():
-            npcs[npc_name] = Character(
-                name=npc_data.name,
-                role=npc_data.role,
-                current_status=npc_data.current_status,
-                traits=npc_data.traits,
-                relationships={k: Relationship(**v) for k, v in npc_data.relationships.items()},
-                inventory=npc_data.inventory,
-                goals=npc_data.goals
-            )
         
         initial_state = GameState(
-            current_location=schema.initial_state.current_location,
-            current_time=schema.initial_state.current_time,
+            current_location=schema.initial_location,
+            current_time=datetime.now().isoformat(),
             protagonist=protagonist,
-            npcs=npcs,
-            academic_status=schema.initial_state.academic_status,
-            stress_level=schema.initial_state.stress_level,
-            energy_level=schema.initial_state.energy_level,
-            mood=schema.initial_state.mood
+            npcs={},
+            inventory=list(protagonist.inventory),
+            relationships=dict(protagonist.relationships),
+            academic_status={},
+            stress_level=10,
+            energy_level=100,
+            mood="neutral",
+            recent_events=[],
         )
         
         return Scenario(
@@ -141,14 +129,14 @@ class ScenarioRegistry:
             name=schema.name,
             description=schema.description,
             version=schema.version,
-            setting=schema.setting,
+            setting={"summary": schema.setting},
             dm_behavior=dm_behavior,
             safety=safety,
             mechanics=mechanics,
             initial_state=initial_state,
-            tags=schema.tags,
+            tags=[],
             author=schema.author,
-            created_at=schema.created_at
+            created_at=schema.created_at,
         )
     
     def get_scenario(self, scenario_id: str) -> Optional[Scenario]:
@@ -201,7 +189,7 @@ class ScenarioRegistry:
             return False, f"File error: {str(e)}"
     
     def save_scenario(self, scenario: Scenario, file_path: Optional[str] = None, format_type: str = "json") -> str:
-        """Save a scenario to a file."""
+        """Save a scenario to a file using the simplified schema format."""
         if not file_path:
             safe_name = "".join(c for c in scenario.id if c.isalnum() or c in '-_')
             extension = "json" if format_type == "json" else "yaml"
@@ -209,7 +197,7 @@ class ScenarioRegistry:
         else:
             file_path = Path(file_path)
         
-        # Convert scenario to schema format for saving
+        # Convert scenario to simplified schema format for saving
         schema_data = self._scenario_to_schema_dict(scenario)
         
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,71 +214,36 @@ class ScenarioRegistry:
         return str(file_path)
     
     def _scenario_to_schema_dict(self, scenario: Scenario) -> Dict:
-        """Convert internal Scenario model to schema dictionary for saving."""
+        """Convert internal Scenario model to simplified schema dictionary for saving."""
+        setting_summary = ""
+        try:
+            if isinstance(scenario.setting, dict):
+                setting_summary = scenario.setting.get("summary") or json.dumps(scenario.setting, ensure_ascii=False)
+            else:
+                setting_summary = str(scenario.setting)
+        except Exception:
+            setting_summary = str(scenario.setting)
+        
+        dm_instructions = "\n".join(scenario.dm_behavior.special_instructions) if scenario.dm_behavior.special_instructions else ""
+        if not dm_instructions:
+            # Compose minimal instruction from structured fields
+            dm_instructions = (
+                f"Tone: {scenario.dm_behavior.tone}; Pacing: {scenario.dm_behavior.pacing}; "
+                f"Style: {scenario.dm_behavior.description_style}; Interaction: {scenario.dm_behavior.interaction_style}."
+            )
+        
         return {
             "id": scenario.id,
             "name": scenario.name,
             "description": scenario.description,
             "version": scenario.version,
-            "setting": scenario.setting,
-            "dm_behavior": {
-                "tone": scenario.dm_behavior.tone,
-                "pacing": scenario.dm_behavior.pacing,
-                "description_style": scenario.dm_behavior.description_style,
-                "interaction_style": scenario.dm_behavior.interaction_style,
-                "special_instructions": scenario.dm_behavior.special_instructions
-            },
-            "safety": {
-                "sfw_lock": scenario.safety.sfw_lock,
-                "content_boundaries": scenario.safety.content_boundaries,
-                "trigger_warnings": scenario.safety.trigger_warnings,
-                "age_rating": "teen"  # Default
-            },
-            "mechanics": {
-                "time_advancement": scenario.mechanics.time_advancement,
-                "consequence_system": scenario.mechanics.consequence_system,
-                "choice_structure": scenario.mechanics.choice_structure,
-                "skill_checks": False,
-                "inventory_management": True
-            },
-            "initial_state": {
-                "current_location": scenario.initial_state.current_location,
-                "current_time": scenario.initial_state.current_time,
-                "protagonist": {
-                    "name": scenario.initial_state.protagonist.name,
-                    "role": scenario.initial_state.protagonist.role,
-                    "current_status": scenario.initial_state.protagonist.current_status,
-                    "traits": scenario.initial_state.protagonist.traits,
-                    "relationships": {
-                        k: {"status": v.status, "score": v.score}
-                        for k, v in scenario.initial_state.protagonist.relationships.items()
-                    },
-                    "inventory": scenario.initial_state.protagonist.inventory,
-                    "goals": scenario.initial_state.protagonist.goals
-                },
-                "npcs": {
-                    k: {
-                        "name": v.name,
-                        "role": v.role,
-                        "current_status": v.current_status,
-                        "traits": v.traits,
-                        "relationships": {
-                            rk: {"status": rv.status, "score": rv.score}
-                            for rk, rv in v.relationships.items()
-                        },
-                        "inventory": v.inventory,
-                        "goals": v.goals
-                    }
-                    for k, v in scenario.initial_state.npcs.items()
-                },
-                "academic_status": scenario.initial_state.academic_status,
-                "stress_level": scenario.initial_state.stress_level,
-                "energy_level": scenario.initial_state.energy_level,
-                "mood": scenario.initial_state.mood
-            },
-            "tags": scenario.tags,
+            "setting": setting_summary,
+            "dungeon_master_behaviour": dm_instructions,
+            "initial_location": scenario.initial_state.current_location,
+            "player_name": scenario.initial_state.protagonist.name,
+            "role": scenario.initial_state.protagonist.role,
             "author": scenario.author,
-            "created_at": scenario.created_at
+            "created_at": scenario.created_at,
         }
     
     def reload(self):

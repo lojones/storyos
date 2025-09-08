@@ -7,12 +7,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-try:
-    from streamlit_json_editor import st_json_editor
-    HAS_JSON_EDITOR = True
-except Exception:
-    HAS_JSON_EDITOR = False
+import hashlib
 import copy
+from services.mongo import MongoSetup
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -139,6 +136,30 @@ def initialize_services():
             or _secret("CHRONICLE_ENCRYPTION_KEY")
             or os.getenv("CHRONICLE_ENCRYPTION_KEY")
         )
+
+        # MongoDB setup (ensure collections/indexes)
+        mongo_uri = _secret("MONGODB_URI") or os.getenv("MONGODB_URI")
+        mongo_user = _secret("MONGODB_USERNAME") or os.getenv("MONGODB_USERNAME")
+        mongo_pass = _secret("MONGODB_PASSWORD") or os.getenv("MONGODB_PASSWORD")
+        mongo_db = _secret("MONGODB_DATABASE_NAME") or os.getenv("MONGODB_DATABASE_NAME") or "storyos"
+        if mongo_uri:
+            try:
+                # Replace placeholders if present
+                if "<username>" in mongo_uri and mongo_user:
+                    mongo_uri = mongo_uri.replace("<username>", str(mongo_user))
+                if "<password>" in mongo_uri and mongo_pass:
+                    mongo_uri = mongo_uri.replace("<password>", str(mongo_pass))
+                ms = MongoSetup(uri=mongo_uri, db_name=mongo_db)
+                ms.initialize_if_needed()
+                # Optionally seed system prompt if empty (idempotent)
+                try:
+                    from dm.prompting import load_system_prompt
+                    ms.seed_system_prompt_if_empty(load_system_prompt())
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error(f"Mongo setup failed: {e}")
+                # Non-fatal; continue without Mongo
         
         if not api_key:
             st.error("API key not found. Please set XAI_API_KEY (for Grok) or OPENAI_API_KEY in secrets.toml or environment variables.")
@@ -199,16 +220,119 @@ def initialize_session_state():
         st.session_state.struct_future = None
     if "struct_target_dm_index" not in st.session_state:
         st.session_state.struct_target_dm_index = None
-
+    # Auth
+    if "auth_user" not in st.session_state:
+        st.session_state.auth_user = None
+    if "auth_error" not in st.session_state:
+        st.session_state.auth_error = None
 
 @st.cache_resource
 def get_executor() -> ThreadPoolExecutor:
     """Shared thread pool for background tasks (non-blocking UI)."""
     return ThreadPoolExecutor(max_workers=2, thread_name_prefix="storyos")
 
+# Simple local-file auth helpers
+_USERS_FILE = Path("data/users.json")
+_AUTH_SALT = os.getenv("STORYOS_AUTH_SALT", "storyos_local_salt")
+
+def _ensure_users_file():
+    _USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not _USERS_FILE.exists():
+        _USERS_FILE.write_text("{}", encoding="utf-8")
+
+def _load_users() -> Dict[str, Any]:
+    try:
+        _ensure_users_file()
+        return json.loads(_USERS_FILE.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return {}
+
+def _save_users(data: Dict[str, Any]):
+    try:
+        _ensure_users_file()
+        _USERS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        st.error(f"Failed to save users: {e}")
+
+def _hash_password(username: str, password: str) -> str:
+    h = hashlib.sha256()
+    h.update(f"{_AUTH_SALT}:{username}:{password}".encode("utf-8"))
+    return h.hexdigest()
+
+def _logout_and_reset():
+    # Clear gameplay/session state on logout
+    st.session_state.auth_user = None
+    st.session_state.player_name = ""
+    st.session_state.initialized = False
+    st.session_state.game_state = None
+    st.session_state.chronicle = None
+    st.session_state.current_scenario = None
+    st.session_state.chat_history = []
+    st.session_state.struct_future = None
+    st.session_state.struct_target_dm_index = None
+    st.rerun()
+
+def ensure_authenticated() -> bool:
+    if st.session_state.auth_user:
+        return True
+    
+    st.markdown("---")
+    st.title("🔐 Login to play")
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        col1, col2 = st.columns(2)
+        login_clicked = col1.form_submit_button("Login", type="primary")
+        register_clicked = col2.form_submit_button("Register")
+    
+    if login_clicked:
+        users = _load_users()
+        rec = users.get(username)
+        if not username or not password:
+            st.error("Enter username and password.")
+            return False
+        if not rec:
+            st.error("User not found.")
+            return False
+        if rec.get("password_hash") != _hash_password(username, password):
+            st.error("Invalid credentials.")
+            return False
+        st.session_state.auth_user = username
+        st.success(f"Welcome, {username}!")
+        st.rerun()
+        return True
+    
+    if register_clicked:
+        users = _load_users()
+        if not username or not password:
+            st.error("Enter username and password.")
+            return False
+        if username in users:
+            st.error("Username already exists.")
+            return False
+        users[username] = {
+            "password_hash": _hash_password(username, password),
+            "created_at": datetime.now().isoformat(),
+        }
+        _save_users(users)
+        st.session_state.auth_user = username
+        st.success(f"Account created. Welcome, {username}!")
+        st.rerun()
+        return True
+    
+    st.info("Create an account or log in to continue.")
+    return False
+
 def render_scenario_selector(scenario_registry):
     """Render scenario selection interface."""
     st.sidebar.header("📖 Choose Your Story")
+
+    # Logged-in user and logout
+    if st.session_state.get("auth_user"):
+        with st.sidebar.expander("Account", expanded=True):
+            st.caption(f"Logged in as: {st.session_state.auth_user}")
+            if st.button("Logout", use_container_width=True):
+                _logout_and_reset()
 
     # Admin full-screen toggle
     if st.sidebar.button("🛠️ Admin (full screen)", use_container_width=True):
@@ -382,6 +506,29 @@ def render_chat_interface(game_engine):
     
     # Chat history display
     st.header("💬 Story Chat")
+
+    # Token usage summary (current turn + running totals)
+    current_turn_in = current_turn_out = current_turn_total = None
+    try:
+        # Find the last DM message with token_usage
+        for msg in reversed(st.session_state.chat_history):
+            if msg.get("role") == "dm" and isinstance(msg.get("token_usage"), dict):
+                usage = msg.get("token_usage") or {}
+                current_turn_in = usage.get("prompt_tokens")
+                current_turn_out = usage.get("completion_tokens")
+                current_turn_total = usage.get("total_tokens")
+                break
+    except Exception:
+        pass
+    running_sent = st.session_state.get("token_sent_total", 0)
+    running_total = st.session_state.get("token_total_overall", 0)
+    with st.container():
+        parts = []
+        if current_turn_total is not None:
+            parts.append(f"this turn: {current_turn_total} (in {current_turn_in or 0}, out {current_turn_out or 0})")
+        parts.append(f"running sent: {running_sent}")
+        parts.append(f"running total: {running_total}")
+        st.caption("Tokens — " + " • ".join(parts))
     
     chat_container = st.container()
     
@@ -461,55 +608,6 @@ def render_chat_interface(game_engine):
         process_user_input(user_input, game_engine)
         st.rerun()
 
-def render_admin_tools(scenario_registry, selected_scenario=None):
-    """Admin tools to import/export/create scenarios with validation."""
-    with st.sidebar.expander("🛠️ Admin: Scenarios", expanded=False):
-        st.caption("Create, import, export scenarios (validated against schema)")
-        # Import
-        uploaded = st.file_uploader("Import scenario (.json/.yaml)", type=["json", "yaml", "yml"], accept_multiple_files=False)
-        if uploaded is not None:
-            import tempfile, json as _json
-            suffix = ".json" if uploaded.name.endswith(".json") else ".yaml"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded.read())
-                tmp.flush()
-                ok, err = scenario_registry.validate_scenario_file(tmp.name)
-                if ok:
-                    # Move into packs dir
-                    target = Path("scenarios/packs") / uploaded.name
-                    Path(target).write_text(Path(tmp.name).read_text(encoding="utf-8"), encoding="utf-8")
-                    scenario_registry.reload()
-                    st.success(f"Imported {uploaded.name}")
-                else:
-                    st.error(f"Validation failed: {err}")
-
-        # Create new (JSON editor)
-        from scenarios.schema import get_scenario_template
-        with st.form("new_scenario_form"):
-            st.write("Create or edit a scenario (JSON)")
-            template = _session_default_json("scenario_editor_json", get_scenario_template())
-            editor = st.text_area("Scenario JSON", value=template, height=240)
-            save_as = st.text_input("File name (no ext)", value="new_scenario")
-            fmt = st.selectbox("Format", ["json", "yaml"], index=0)
-            submitted = st.form_submit_button("Save Scenario")
-            if submitted:
-                try:
-                    data = json.loads(editor) if fmt == "json" else _yaml_safe_load(editor)
-                    # Validate
-                    from scenarios.schema import validate_scenario_dict
-                    validate_scenario_dict(data)
-                    # Save
-                    filename = f"{save_as}.{fmt}"
-                    path = Path("scenarios/packs") / filename
-                    if fmt == "json":
-                        Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-                    else:
-                        import yaml as _yaml
-                        Path(path).write_text(_yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
-                    scenario_registry.reload()
-                    st.success(f"Saved {filename}")
-                except Exception as e:
-                    st.error(f"Failed to save: {e}")
 
 def _read_scenario_file(path: Path) -> Dict[str, Any]:
     import yaml as _yaml
@@ -527,6 +625,36 @@ def _write_scenario_file(path: Path, data: Dict[str, Any]):
     else:
         path.write_text(_yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
+def _get_mongo_db_from_env():
+    """Return a Mongo DB handle if configured, else None."""
+    try:
+        def _s(name: str):
+            try:
+                v = st.secrets.get(name)
+            except Exception:
+                v = None
+            if v:
+                return v
+            try:
+                general = st.secrets.get("general") or st.secrets["general"]
+                return general.get(name) if isinstance(general, dict) else general[name]
+            except Exception:
+                return os.getenv(name)
+        uri = _s("MONGODB_URI") or os.getenv("MONGODB_URI")
+        user = _s("MONGODB_USERNAME") or os.getenv("MONGODB_USERNAME")
+        pw = _s("MONGODB_PASSWORD") or os.getenv("MONGODB_PASSWORD")
+        dbname = _s("MONGODB_DATABASE_NAME") or os.getenv("MONGODB_DATABASE_NAME") or "storyos"
+        if not uri:
+            return None
+        if "<username>" in uri and user:
+            uri = uri.replace("<username>", str(user))
+        if "<password>" in uri and pw:
+            uri = uri.replace("<password>", str(pw))
+        ms = MongoSetup(uri=uri, db_name=dbname)
+        return ms.db
+    except Exception:
+        return None
+
 def render_admin_screen(scenario_registry):
     st.title("🛠️ Scenario Admin")
     st.caption("Browse, edit, and save scenarios.")
@@ -534,32 +662,96 @@ def render_admin_screen(scenario_registry):
     # Show current system prompt (rendered Markdown)
     with st.expander("📜 View System Prompt (Markdown)", expanded=False):
         try:
-            prompt_path = Path("config/system_prompt.md")
-            if prompt_path.exists():
-                st.markdown(prompt_path.read_text(encoding="utf-8"))
+            db = _get_mongo_db_from_env()
+            doc = None
+            if db is not None:
+                try:
+                    col = db["sos_system_prompts"]
+                    doc = col.find_one({"active": True}) or col.find_one(sort=[("updated_at", -1)])
+                except Exception:
+                    doc = None
+            if doc and isinstance(doc.get("content"), str) and doc.get("content").strip():
+                st.markdown(doc["content"])  # Prefer DB prompt
             else:
-                st.info("config/system_prompt.md not found.")
+                prompt_path = Path("config/system_prompt.md")
+                if prompt_path.exists():
+                    st.markdown(prompt_path.read_text(encoding="utf-8"))
+                else:
+                    st.info("No system prompt found in DB or config/system_prompt.md.")
         except Exception as e:
             st.error(f"Failed to load system prompt: {e}")
 
     top = st.container()
     body = st.container()
 
+    # Prefer MongoDB scenarios; fallback to filesystem
+    db = _get_mongo_db_from_env()
+    using_db = False
+    docs: list[dict] = []
+    labels_db: list[str] = []
+    if db is not None:
+        try:
+            col = db["sos_scenario_templates"]
+            # Exclude _id to keep JSON clean in the editor
+            docs = list(col.find({}, {"_id": 0}).sort("name", 1))
+            if docs:
+                using_db = True
+                labels_db = [f"{d.get('name', d.get('id',''))} ({d.get('id','')})" for d in docs]
+        except Exception:
+            using_db = False
+            docs = []
+            labels_db = []
+
     packs_dir = Path("scenarios/packs")
-    files = sorted([*packs_dir.glob("*.json"), *packs_dir.glob("*.yaml"), *packs_dir.glob("*.yml")])
-    labels = [f"{p.stem} ({p.name})" for p in files]
+    files = sorted([*packs_dir.glob("*.json"), *packs_dir.glob("*.yaml"), *packs_dir.glob("*.yml")]) if not using_db else []
+    labels_fs = [f"{p.stem} ({p.name})" for p in files]
 
     with top:
         cols = st.columns([3,1])
         with cols[0]:
-            selected_label = st.selectbox("Available Scenarios", options=labels or ["(none found)"])
+            if using_db:
+                selected_label = st.selectbox("Available Scenarios (MongoDB)", options=labels_db or ["(none found)"])
+            else:
+                selected_label = st.selectbox("Available Scenarios (files)", options=labels_fs or ["(none found)"])
         with cols[1]:
             if st.button("Exit Admin", use_container_width=True):
                 st.session_state.admin_mode = False
                 st.rerun()
 
-    if files and selected_label in labels:
-        idx = labels.index(selected_label)
+    # Load selected scenario into the editor
+    if using_db and labels_db and selected_label in labels_db:
+        idx = labels_db.index(selected_label)
+        doc = docs[idx]
+        # Only reload editor if selection changed
+        selected_key = f"db:{doc.get('id','')}"
+        if st.session_state.get("admin_selected_path") != selected_key:
+            try:
+                st.session_state.admin_editor_text = json.dumps(doc, indent=2)
+                st.session_state.admin_selected_path = selected_key
+                # Seed simplified field editors
+                st.session_state["admin_setting_text"] = str(doc.get("setting", ""))
+                st.session_state["admin_dm_behaviour_text"] = str(doc.get("dungeon_master_behaviour", ""))
+                st.session_state["admin_initial_location_text"] = str(doc.get("player_name", ""))
+                st.session_state["admin_player_name_text"] = str(doc.get("player_name", ""))
+                st.session_state["admin_role_text"] = str(doc.get("role", ""))
+                st.session_state["admin_version_text"] = str(doc.get("version", "1.0.0"))
+                st.session_state["admin_author_text"] = str(doc.get("author", "Unknown"))
+                st.session_state["admin_created_at_text"] = str(doc.get("created_at", datetime.now().isoformat()))
+            except Exception as e:
+                st.error(f"Failed to load scenario from DB: {e}")
+                st.session_state.admin_editor_text = "{}"
+                st.session_state.admin_selected_path = selected_key
+                st.session_state["admin_setting_text"] = ""
+                st.session_state["admin_dm_behaviour_text"] = ""
+                st.session_state["admin_initial_location_text"] = ""
+                st.session_state["admin_player_name_text"] = ""
+                st.session_state["admin_role_text"] = ""
+                st.session_state["admin_version_text"] = "1.0.0"
+                st.session_state["admin_author_text"] = "Unknown"
+                st.session_state["admin_created_at_text"] = datetime.now().isoformat()
+
+    elif not using_db and files and selected_label in labels_fs:
+        idx = labels_fs.index(selected_label)
         path = files[idx]
         if st.session_state.admin_selected_path != str(path):
             # Load file into editor state on selection change
@@ -567,289 +759,119 @@ def render_admin_screen(scenario_registry):
                 data = _read_scenario_file(path)
                 st.session_state.admin_editor_text = json.dumps(data, indent=2)
                 st.session_state.admin_selected_path = str(path)
-                # Seed section editors
-                st.session_state["admin_setting_json"] = json.dumps(data.get("setting", {}), indent=2)
-                st.session_state["admin_dm_behavior_json"] = json.dumps(data.get("dm_behavior", {}), indent=2)
-                st.session_state["admin_safety_json"] = json.dumps(data.get("safety", {}), indent=2)
-                st.session_state["admin_mechanics_json"] = json.dumps(data.get("mechanics", {}), indent=2)
-                st.session_state["admin_initial_state_json"] = json.dumps(data.get("initial_state", {}), indent=2)
+                # Seed simplified field editors
+                st.session_state["admin_setting_text"] = str(data.get("setting", ""))
+                st.session_state["admin_dm_behaviour_text"] = str(data.get("dungeon_master_behaviour", ""))
+                st.session_state["admin_initial_location_text"] = str(data.get("player_name", ""))
+                st.session_state["admin_player_name_text"] = str(data.get("player_name", ""))
+                st.session_state["admin_role_text"] = str(data.get("role", ""))
+                st.session_state["admin_version_text"] = str(data.get("version", "1.0.0"))
+                st.session_state["admin_author_text"] = str(data.get("author", "Unknown"))
+                st.session_state["admin_created_at_text"] = str(data.get("created_at", datetime.now().isoformat()))
             except Exception as e:
                 st.error(f"Failed to load scenario: {e}")
                 st.session_state.admin_editor_text = "{}"
                 st.session_state.admin_selected_path = str(path)
-                st.session_state["admin_setting_json"] = "{}"
-                st.session_state["admin_dm_behavior_json"] = "{}"
-                st.session_state["admin_safety_json"] = "{}"
-                st.session_state["admin_mechanics_json"] = "{}"
-                st.session_state["admin_initial_state_json"] = "{}"
+                st.session_state["admin_setting_text"] = ""
+                st.session_state["admin_dm_behaviour_text"] = ""
+                st.session_state["admin_initial_location_text"] = ""
+                st.session_state["admin_player_name_text"] = ""
+                st.session_state["admin_role_text"] = ""
+                st.session_state["admin_version_text"] = "1.0.0"
+                st.session_state["admin_author_text"] = "Unknown"
+                st.session_state["admin_created_at_text"] = datetime.now().isoformat()
 
-        tabs = st.tabs(["Overview", "Form Editor", "Visual JSON Editor", "Edit JSON"])
+    tabs = st.tabs(["Overview"])  # Keep existing editor behavior
 
-        with tabs[0]:
+    with tabs[0]:
+        try:
+            parsed = json.loads(st.session_state.admin_editor_text or "{}")
+        except Exception:
+            parsed = {}
+        # Editable key fields (simplified schema)
+        st.subheader("Details")
+        colA, colB = st.columns(2)
+        with colA:
+            name = st.text_input("Name", value=str(parsed.get("name", "")))
+            sid = st.text_input("ID", value=str(parsed.get("id", "")))
+            author = st.text_input("Author", value=st.session_state.get("admin_author_text", "Unknown"))
+            version = st.text_input("Version", value=st.session_state.get("admin_version_text", "1.0.0"))
+        with colB:
+            created_at = st.text_input("Created At (ISO)", value=st.session_state.get("admin_created_at_text", datetime.now().isoformat()))
+            player_name = st.text_input("Player Name", value=st.session_state.get("admin_player_name_text", ""))
+            role = st.text_input("Role", value=st.session_state.get("admin_role_text", ""))
+            initial_location = st.text_input("Initial Location", value=st.session_state.get("admin_initial_location_text", ""))
+
+        desc = st.text_area("Description", value=str(parsed.get("description", "")), height=120)
+
+        st.markdown("---")
+        st.subheader("Scenario Text Sections")
+        setting_text = st.text_area("Setting (text)", value=st.session_state.get("admin_setting_text", ""), height=180, key="admin_setting_text_area")
+        dm_behavior_text = st.text_area("Dungeon Master Behaviour (text)", value=st.session_state.get("admin_dm_behaviour_text", ""), height=220, key="admin_dm_behaviour_text_area")
+
+        if st.button("Apply to JSON", type="secondary"):
             try:
-                parsed = json.loads(st.session_state.admin_editor_text or "{}")
-            except Exception:
-                parsed = {}
-            # Editable key fields
-            st.subheader("Details")
-            colA, colB = st.columns(2)
-            with colA:
-                name = st.text_input("Name", value=str(parsed.get("name", "")))
-                sid = st.text_input("ID", value=str(parsed.get("id", "")))
-                author = st.text_input("Author", value=str(parsed.get("author", "Unknown")))
-            with colB:
-                version = st.text_input("Version", value=str(parsed.get("version", "1.0.0")))
-                tags = st.text_input("Tags (comma-separated)", value=", ".join(parsed.get("tags", [])))
-            desc = st.text_area("Description", value=str(parsed.get("description", "")), height=120)
+                parsed["name"] = name
+                parsed["id"] = sid
+                parsed["author"] = author
+                parsed["version"] = version
+                parsed["description"] = desc
+                parsed["created_at"] = created_at
+                parsed["player_name"] = player_name
+                parsed["role"] = role
+                parsed["initial_location"] = initial_location
+                parsed["setting"] = setting_text
+                parsed["dungeon_master_behaviour"] = dm_behavior_text
 
-            st.markdown("---")
-            st.subheader("Advanced Sections (JSON)")
-            sec_cols = st.columns(2)
-            with sec_cols[0]:
-                setting_text = st.text_area("setting (object)", value=st.session_state.get("admin_setting_json", "{}"), height=160, key="admin_setting_text")
-                dm_behavior_text = st.text_area("dm_behavior (object)", value=st.session_state.get("admin_dm_behavior_json", "{}"), height=180, key="admin_dm_behavior_text")
-                safety_text = st.text_area("safety (object)", value=st.session_state.get("admin_safety_json", "{}"), height=180, key="admin_safety_text")
-            with sec_cols[1]:
-                mechanics_text = st.text_area("mechanics (object)", value=st.session_state.get("admin_mechanics_json", "{}"), height=160, key="admin_mechanics_text")
-                initial_state_text = st.text_area("initial_state (object)", value=st.session_state.get("admin_initial_state_json", "{}"), height=360, key="admin_initial_state_text")
+                # Persist simplified fields to session
+                st.session_state["admin_setting_text"] = setting_text
+                st.session_state["admin_dm_behaviour_text"] = dm_behavior_text
+                st.session_state["admin_initial_location_text"] = initial_location
+                st.session_state["admin_player_name_text"] = player_name
+                st.session_state["admin_role_text"] = role
+                st.session_state["admin_version_text"] = version
+                st.session_state["admin_author_text"] = author
+                st.session_state["admin_created_at_text"] = created_at
 
-            if st.button("Apply to JSON", type="secondary"):
+                st.session_state.admin_editor_text = json.dumps(parsed, indent=2)
+                st.success("Applied changes to JSON editor")
+            except Exception as e:
+                st.error(f"Failed to apply: {e}")
+
+        st.markdown("---")
+        st.subheader("Save from Overview")
+        colsv = st.columns(2)
+        with colsv[0]:
+            if st.button("Save (validate)", type="primary", use_container_width=True, key="admin_overview_save"):
                 try:
-                    parsed["name"] = name
-                    parsed["id"] = sid
-                    parsed["author"] = author
-                    parsed["version"] = version
-                    parsed["description"] = desc
-                    parsed["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
-                    # Parse advanced sections
-                    import json as _json
-                    parsed["setting"] = _json.loads(setting_text or "{}")
-                    parsed["dm_behavior"] = _json.loads(dm_behavior_text or "{}")
-                    parsed["safety"] = _json.loads(safety_text or "{}")
-                    parsed["mechanics"] = _json.loads(mechanics_text or "{}")
-                    parsed["initial_state"] = _json.loads(initial_state_text or "{}")
-                    # Persist section state in session
-                    st.session_state["admin_setting_json"] = json.dumps(parsed.get("setting", {}), indent=2)
-                    st.session_state["admin_dm_behavior_json"] = json.dumps(parsed.get("dm_behavior", {}), indent=2)
-                    st.session_state["admin_safety_json"] = json.dumps(parsed.get("safety", {}), indent=2)
-                    st.session_state["admin_mechanics_json"] = json.dumps(parsed.get("mechanics", {}), indent=2)
-                    st.session_state["admin_initial_state_json"] = json.dumps(parsed.get("initial_state", {}), indent=2)
-                    st.session_state.admin_editor_text = json.dumps(parsed, indent=2)
-                    st.success("Applied changes to JSON editor")
+                    data = parsed
+                    from scenarios.schema import validate_scenario_dict
+                    validate_scenario_dict(data)
+                    _write_scenario_file(Path(st.session_state.admin_selected_path), data)
+                    scenario_registry.reload()
+                    st.session_state.admin_editor_text = json.dumps(data, indent=2)
+                    st.success("Saved scenario")
                 except Exception as e:
-                    st.error(f"Failed to apply: {e}")
-
-            st.markdown("---")
-            st.subheader("Save from Overview")
-            colsv = st.columns(2)
-            with colsv[0]:
-                if st.button("Save (validate)", type="primary", use_container_width=True, key="admin_overview_save"):
-                    try:
-                        data = parsed
-                        from scenarios.schema import validate_scenario_dict
-                        validate_scenario_dict(data)
-                        _write_scenario_file(Path(st.session_state.admin_selected_path), data)
-                        scenario_registry.reload()
-                        st.session_state.admin_editor_text = json.dumps(data, indent=2)
-                        st.success("Saved scenario")
-                    except Exception as e:
-                        st.error(f"Save failed: {e}")
-            with colsv[1]:
-                save_as2 = st.text_input("Save As (filename .json/.yaml)", value=Path(st.session_state.admin_selected_path).name, key="admin_overview_saveas")
-                if st.button("Save As New (validate)", use_container_width=True, key="admin_overview_saveas_btn"):
-                    try:
-                        data = parsed
-                        from scenarios.schema import validate_scenario_dict
-                        validate_scenario_dict(data)
-                        target = Path("scenarios/packs") / save_as2
-                        _write_scenario_file(target, data)
-                        scenario_registry.reload()
-                        st.session_state.admin_selected_path = str(target)
-                        st.session_state.admin_editor_text = json.dumps(data, indent=2)
-                        st.success(f"Saved as {target.name}")
-                    except Exception as e:
-                        st.error(f"Save As failed: {e}")
-
-            st.markdown("---")
-            st.subheader("Quick View")
-            st.json(parsed)
-
-        # Form Editor: auto-generate inputs for leaf fields
-        with tabs[1]:
-            try:
-                base_obj = json.loads(st.session_state.admin_editor_text or "{}")
-            except Exception:
-                base_obj = {}
-            st.caption("Edit any field via inputs. This editor walks the JSON and renders inputs for each leaf value. Arrays can be edited item-by-item.")
-
-            def _key(prefix: str) -> str:
-                sel = st.session_state.get("admin_selected_path", "")
-                return f"admin_form::{sel}::{prefix}"
-
-            def _edit_value(label: str, value: Any, path: str) -> Any:
-                k = _key(path)
-                if isinstance(value, bool):
-                    return st.checkbox(label, value=value, key=k)
-                if isinstance(value, int):
-                    return int(st.number_input(label, value=value, step=1, key=k))
-                if isinstance(value, float):
-                    return float(st.number_input(label, value=value, step=0.1, format="%f", key=k))
-                if isinstance(value, str):
-                    # Use textarea for long strings
-                    if len(value) > 120 or "\n" in value:
-                        return st.text_area(label, value=value, height=120, key=k)
-                    return st.text_input(label, value=value, key=k)
-                # Fallback to JSON text for unknown types
+                    st.error(f"Save failed: {e}")
+        with colsv[1]:
+            save_as2 = st.text_input("Save As (filename .json/.yaml)", value=Path(st.session_state.admin_selected_path).name, key="admin_overview_saveas")
+            if st.button("Save As New (validate)", use_container_width=True, key="admin_overview_saveas_btn"):
                 try:
-                    return json.loads(st.text_area(label + " (json)", value=json.dumps(value, indent=2), height=140, key=k))
-                except Exception:
-                    return value
+                    data = parsed
+                    from scenarios.schema import validate_scenario_dict
+                    validate_scenario_dict(data)
+                    target = Path("scenarios/packs") / save_as2
+                    _write_scenario_file(target, data)
+                    scenario_registry.reload()
+                    st.session_state.admin_selected_path = str(target)
+                    st.session_state.admin_editor_text = json.dumps(data, indent=2)
+                    st.success(f"Saved as {target.name}")
+                except Exception as e:
+                    st.error(f"Save As failed: {e}")
 
-            def _render_node(obj: Any, path: str, depth: int = 0) -> Any:
-                # Dict
-                if isinstance(obj, dict):
-                    new_obj = {}
-                    for subk, subv in obj.items():
-                        subpath = f"{path}.{subk}" if path else subk
-                        if isinstance(subv, (dict, list)):
-                            if depth == 0:
-                                # Only use expanders at the top level to avoid nesting
-                                with st.expander(subk, expanded=False):
-                                    new_obj[subk] = _render_node(subv, subpath, depth + 1)
-                            else:
-                                st.markdown(f"**{subk}**")
-                                container = st.container()
-                                with container:
-                                    new_obj[subk] = _render_node(subv, subpath, depth + 1)
-                        else:
-                            new_obj[subk] = _edit_value(subk, subv, subpath)
-                    return new_obj
-                # List
-                if isinstance(obj, list):
-                    new_list = []
-                    for i, item in enumerate(obj):
-                        item_path = f"{path}[{i}]"
-                        if isinstance(item, (dict, list)):
-                            if depth == 0:
-                                # Only use expanders at the top level to avoid nesting
-                                with st.expander(f"[{i}]", expanded=False):
-                                    new_list.append(_render_node(item, item_path, depth + 1))
-                            else:
-                                st.markdown(f"*Item {i}*")
-                                new_list.append(_render_node(item, item_path, depth + 1))
-                        else:
-                            new_list.append(_edit_value(f"[{i}]", item, item_path))
-                    st.caption("Add/remove items is not supported in this basic form; edit values and use the JSON tab for structure changes.")
-                    return new_list
-                # Leaf (should be handled earlier)
-                return _edit_value(path.rsplit('.')[-1], obj, path)
-
-            edited_obj = _render_node(base_obj, path="root", depth=0)
-
-            form_col1, form_col2 = st.columns(2)
-            with form_col1:
-                if st.button("Save (validate)", type="primary", use_container_width=True, key="admin_form_save"):
-                    try:
-                        from scenarios.schema import validate_scenario_dict
-                        validate_scenario_dict(edited_obj)
-                        _write_scenario_file(Path(st.session_state.admin_selected_path), edited_obj)
-                        scenario_registry.reload()
-                        st.session_state.admin_editor_text = json.dumps(edited_obj, indent=2)
-                        st.success("Saved scenario")
-                    except Exception as e:
-                        st.error(f"Save failed: {e}")
-            with form_col2:
-                save_as_f = st.text_input("Save As (filename .json/.yaml)", value=Path(st.session_state.admin_selected_path).name, key="admin_form_saveas")
-                if st.button("Save As New (validate)", use_container_width=True, key="admin_form_saveas_btn"):
-                    try:
-                        from scenarios.schema import validate_scenario_dict
-                        validate_scenario_dict(edited_obj)
-                        target = Path("scenarios/packs") / save_as_f
-                        _write_scenario_file(target, edited_obj)
-                        scenario_registry.reload()
-                        st.session_state.admin_selected_path = str(target)
-                        st.session_state.admin_editor_text = json.dumps(edited_obj, indent=2)
-                        st.success(f"Saved as {target.name}")
-                    except Exception as e:
-                        st.error(f"Save As failed: {e}")
-
-        with tabs[2]:
-            if HAS_JSON_EDITOR:
-                try:
-                    parsed = json.loads(st.session_state.admin_editor_text or "{}")
-                except Exception:
-                    parsed = {}
-                st.write("Edit the scenario using a visual JSON editor. Changes are kept in memory until you save.")
-                edited = st_json_editor(parsed, expanded=True, key="visual_json_editor")
-                # Buttons for saving the edited JSON
-                vcol1, vcol2 = st.columns(2)
-                with vcol1:
-                    if st.button("Save (validate)", type="primary", use_container_width=True, key="admin_visual_save"):
-                        try:
-                            data = edited if isinstance(edited, dict) else parsed
-                            from scenarios.schema import validate_scenario_dict
-                            validate_scenario_dict(data)
-                            _write_scenario_file(Path(st.session_state.admin_selected_path), data)
-                            scenario_registry.reload()
-                            st.session_state.admin_editor_text = json.dumps(data, indent=2)
-                            # refresh section states
-                            st.session_state["admin_setting_json"] = json.dumps(data.get("setting", {}), indent=2)
-                            st.session_state["admin_dm_behavior_json"] = json.dumps(data.get("dm_behavior", {}), indent=2)
-                            st.session_state["admin_safety_json"] = json.dumps(data.get("safety", {}), indent=2)
-                            st.session_state["admin_mechanics_json"] = json.dumps(data.get("mechanics", {}), indent=2)
-                            st.session_state["admin_initial_state_json"] = json.dumps(data.get("initial_state", {}), indent=2)
-                            st.success("Saved scenario")
-                        except Exception as e:
-                            st.error(f"Save failed: {e}")
-                with vcol2:
-                    save_as_v = st.text_input("Save As (filename .json/.yaml)", value=Path(st.session_state.admin_selected_path).name, key="admin_visual_saveas")
-                    if st.button("Save As New (validate)", use_container_width=True, key="admin_visual_saveas_btn"):
-                        try:
-                            data = edited if isinstance(edited, dict) else parsed
-                            from scenarios.schema import validate_scenario_dict
-                            validate_scenario_dict(data)
-                            target = Path("scenarios/packs") / save_as_v
-                            _write_scenario_file(target, data)
-                            scenario_registry.reload()
-                            st.session_state.admin_selected_path = str(target)
-                            st.session_state.admin_editor_text = json.dumps(data, indent=2)
-                            st.success(f"Saved as {target.name}")
-                        except Exception as e:
-                            st.error(f"Save As failed: {e}")
-            else:
-                st.info("Install 'streamlit-json-editor' to enable the visual JSON editor. Run: pip install streamlit-json-editor")
-
-        with tabs[3]:
-            editor = st.text_area("Scenario JSON", value=st.session_state.admin_editor_text or "{}", height=420, key="scenario_admin_editor")
-            st.session_state.admin_editor_text = editor
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Save", type="primary", use_container_width=True):
-                    try:
-                        data = json.loads(st.session_state.admin_editor_text)
-                        # Validate
-                        from scenarios.schema import validate_scenario_dict
-                        validate_scenario_dict(data)
-                        # Save to same file
-                        _write_scenario_file(Path(st.session_state.admin_selected_path), data)
-                        scenario_registry.reload()
-                        st.success("Saved scenario")
-                    except Exception as e:
-                        st.error(f"Save failed: {e}")
-            with col2:
-                save_as = st.text_input("Save As (filename with .json or .yaml)", value=Path(st.session_state.admin_selected_path).name)
-                if st.button("Save As New", use_container_width=True):
-                    try:
-                        data = json.loads(st.session_state.admin_editor_text)
-                        from scenarios.schema import validate_scenario_dict
-                        validate_scenario_dict(data)
-                        target = Path("scenarios/packs") / save_as
-                        _write_scenario_file(target, data)
-                        scenario_registry.reload()
-                        st.session_state.admin_selected_path = str(target)
-                        st.success(f"Saved as {target.name}")
-                    except Exception as e:
-                        st.error(f"Save As failed: {e}")
+        st.markdown("---")
+        st.subheader("Quick View")
+        st.json(parsed)
 
 def _yaml_safe_load(text: str):
     import yaml as _yaml
@@ -1145,129 +1167,110 @@ What would you like to do first?"""
         st.error(f"Failed to initialize game: {e}")
         logger.error(f"Game initialization error: {e}")
 
+def _list_save_files(chronicle_manager: ChronicleManager):
+    try:
+        save_dir = chronicle_manager.saves_dir
+        files = sorted([p for p in save_dir.glob("*.json")], key=lambda p: p.stat().st_mtime, reverse=True)
+        labels = [f"{p.name}" for p in files]
+        return files, labels
+    except Exception:
+        return [], []
+
+def render_home_portal(scenario_registry: ScenarioRegistry, chronicle_manager: ChronicleManager, game_engine: GameEngine):
+    st.header("Welcome")
+    st.caption("Choose an action to begin.")
+
+    # Top-level actions
+    top_cols = st.columns([1, 1, 1])
+    with top_cols[0]:
+        if st.button("🛠️ Open Admin", use_container_width=True):
+            st.session_state.admin_mode = True
+            st.rerun()
+    with top_cols[1]:
+        pass
+    with top_cols[2]:
+        # Show current account and a logout shortcut
+        if st.session_state.get("auth_user"):
+            st.info(f"Logged in as: {st.session_state.auth_user}")
+
+    st.markdown("---")
+    col_left, col_right = st.columns([3, 2])
+
+    # New Game pane
+    with col_left:
+        st.subheader("Start a New Game")
+        scenarios = scenario_registry.list_scenarios()
+        if not scenarios:
+            st.error("No scenarios found. Add files to scenarios/packs/ to begin.")
+        else:
+            options = {f"{s.name} ({s.id})": s for s in scenarios}
+            choice = st.selectbox("Scenario", list(options.keys()), key="home_scenario_select")
+            selected = options[choice] if choice else None
+            if selected:
+                with st.expander("Scenario Details", expanded=False):
+                    st.write(f"**Author:** {selected.author}")
+                    st.write(f"**Version:** {selected.version}")
+                    st.write(selected.description)
+            placeholder_text = (
+                f"e.g., {st.session_state.auth_user}'s Campus Adventure" if st.session_state.get("auth_user") else "e.g., Alex's Campus Adventure"
+            )
+            story_name = st.text_input("Story name", value=st.session_state.get("player_name", ""), placeholder=placeholder_text, key="home_story_name")
+            start_disabled = not bool(story_name.strip()) or selected is None
+            if st.button("🚀 Start New Game", type="primary", use_container_width=True, disabled=start_disabled):
+                try:
+                    st.session_state.player_name = story_name.strip()
+                    initialize_new_game(selected, game_engine, story_label=st.session_state.player_name)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to start game: {e}")
+
+    # Load Game pane
+    with col_right:
+        st.subheader("Load a Saved Game")
+        files, labels = _list_save_files(chronicle_manager)
+        if not files:
+            st.info("No saves found yet.")
+        else:
+            selected_label = st.selectbox("Saved files", options=labels, key="home_save_select")
+            can_load = selected_label in labels
+            if st.button("📥 Load Selected", use_container_width=True, disabled=not can_load):
+                try:
+                    path = files[labels.index(selected_label)]
+                    _load_saved_game(str(path), chronicle_manager, scenario_registry)
+                    st.success(f"Loaded {path.name}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Load failed: {e}")
+
 def main():
     """Main application function."""
     
     st.title("📚 storyOS")
     st.subheader("Interactive Narrative Chat with Scenario-Defined DM")
     
-    # Initialize services
+    # Initialize session state early and enforce auth
+    initialize_session_state()
+    if not ensure_authenticated():
+        return
+    
+    # Initialize services (after auth)
     llm_service, chronicle_manager, scenario_registry, game_engine = initialize_services()
     
-    # Initialize session state
-    initialize_session_state()
-    
-    # Test / Reload controls
-    reload_cols = st.sidebar.columns(2)
-    with reload_cols[0]:
-        if st.button("🔍 Test LLM Connection"):
-            with st.spinner("Testing connection..."):
-                success, message = llm_service.test_connection()
-                if success:
-                    st.success(f"✅ {message}")
-                else:
-                    st.error(f"❌ {message}")
-    with reload_cols[1]:
-        if st.button("♻️ Reload Services"):
-            try:
-                st.cache_resource.clear()
-            except Exception:
-                pass
-            st.success("Services reloaded")
-            st.rerun()
-    
-    # Scenario selection / Admin entry
-    selected_scenario = render_scenario_selector(scenario_registry)
-    # Always expose Load Game in the sidebar
-    render_load_game(chronicle_manager, scenario_registry)
-    
-    # Initialize game if scenario selected and not initialized
-    if selected_scenario and not st.session_state.initialized:
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("👤 Your Story Name")
-        st.sidebar.text_input(
-            "Enter a name to identify this story",
-            key="player_name",
-            placeholder="e.g., Alex's Campus Adventure",
-            help="Used for saves and to label the chronicle.",
-        )
-        can_start = bool(st.session_state.player_name.strip())
-        if st.sidebar.button("🚀 Start Story", type="primary", use_container_width=True, disabled=not can_start):
-            initialize_new_game(selected_scenario, game_engine, st.session_state.player_name.strip())
-            st.rerun()
-    
-    # If a structured follow-up is pending via background job, apply it when ready
-    if st.session_state.struct_future is not None and st.session_state.initialized:
-        fut = st.session_state.struct_future
-        if fut.done():
-            try:
-                dm_response, new_state, new_chronicle = fut.result()
-                st.session_state.game_state = new_state
-                st.session_state.chronicle = new_chronicle
-                # Token accounting
-                usage = {}
-                try:
-                    usage = (dm_response.meta or {}).get("token_usage") or {}
-                    prompt_tokens = int(usage.get("prompt_tokens") or 0)
-                    total_tokens = int(usage.get("total_tokens") or 0)
-                    st.session_state.token_sent_total = int(st.session_state.token_sent_total) + prompt_tokens
-                    st.session_state.token_total_overall = int(st.session_state.token_total_overall) + total_tokens
-                except Exception:
-                    usage = {}
-                # Update targeted DM message
-                idx = st.session_state.struct_target_dm_index
-                if isinstance(idx, int) and 0 <= idx < len(st.session_state.chat_history):
-                    st.session_state.chat_history[idx]["suggested_actions"] = dm_response.suggested_actions
-                    st.session_state.chat_history[idx]["token_usage"] = usage
-                    st.session_state.chat_history[idx]["running_token_sent_total"] = st.session_state.token_sent_total
-                    st.session_state.chat_history[idx]["running_token_total_overall"] = st.session_state.token_total_overall
-                    st.session_state.chat_history[idx]["turn_stage"] = "struct"
-                # Clear handles
-                st.session_state.struct_future = None
-                st.session_state.struct_target_dm_index = None
-                st.rerun()
-            except Exception as e:
-                st.session_state.struct_future = None
-                st.session_state.struct_target_dm_index = None
-                st.error(f"Failed to complete structured response: {e}")
-
-    # Admin full-screen mode
+    # If admin requested, render admin full screen
     if st.session_state.admin_mode:
         render_admin_screen(scenario_registry)
         return
 
+    # If no active game, show main hub (not sidebar-driven)
+    if not st.session_state.initialized:
+        render_home_portal(scenario_registry, chronicle_manager, game_engine)
+        return
+
     # Render game controls and info if game is active
-    if st.session_state.initialized:
-        render_game_controls(game_engine, chronicle_manager, scenario_registry)
-        render_chronicle_info()
-        render_game_state_info()
-        
-        # Main chat interface
-        render_chat_interface(game_engine)
-    
-    else:
-        # Welcome screen
-        if selected_scenario:
-            st.info("Click 'Start Story' in the sidebar to begin your adventure!")
-        else:
-            st.info("Select a scenario from the sidebar to get started.")
-            
-        # Show available scenarios
-        scenarios = scenario_registry.list_scenarios()
-        if scenarios:
-            st.header("🎭 Available Stories")
-            
-            for scenario in scenarios[:3]:  # Show first 3
-                with st.expander(f"📖 {scenario.name}"):
-                    st.write(f"**Author:** {scenario.author}")
-                    st.write(f"**Tags:** {', '.join(scenario.tags)}")
-                    st.write(scenario.description)
-                    
-                    if scenario.safety.sfw_lock:
-                        st.info("🔒 SFW Content")
-                    
-                    if scenario.safety.trigger_warnings:
-                        st.warning(f"⚠️ Content warnings: {', '.join(scenario.safety.trigger_warnings)}")
+    render_game_controls(game_engine, chronicle_manager, scenario_registry)
+    render_chronicle_info()
+    render_game_state_info()
+    render_chat_interface(game_engine)
 
 if __name__ == "__main__":
     main()

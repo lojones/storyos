@@ -136,6 +136,51 @@ class GameEngine:
             fallback = self._create_error_response(str(e))
             return DMResponse(**fallback), game_state, chronicle
 
+    def initialize_new_game(self, scenario: Scenario, story_label: Optional[str] = None) -> Tuple[GameState, Chronicle]:
+        """Initialize a new game with the given scenario and create initial chronicle."""
+        # Start from scenario's initial state
+        game_state = copy.deepcopy(scenario.initial_state)
+        
+        # Build initial current snapshot
+        initial_current = CurrentScenario(
+            location=game_state.current_location,
+            time=game_state.current_time,
+            emotional_context=f"Starting {scenario.name}",
+            npcs_present=list(game_state.npcs.keys()),
+            open_choices=["Look around", "Introduce yourself", "Check the time"],
+            prompt="What would you like to do first?",
+        )
+        
+        # Create chronicle with a permissive default policy
+        from dm.models import Policy
+        policy = Policy(sfw_mode=False, mature_handling="inline_if_allowed", age_verified=True)
+        chronicle = self.chronicle_manager.create_chronicle(scenario.id, initial_current, policy)
+        
+        # Seed world state from scenario
+        setting_list: List[str] = [f"Location: {game_state.current_location}"]
+        try:
+            if isinstance(scenario.setting, dict) and scenario.setting.get("summary"):
+                setting_list.append(str(scenario.setting.get("summary")))
+            elif not isinstance(scenario.setting, dict):
+                setting_list.append(str(scenario.setting))
+        except Exception:
+            pass
+        world_updates = {
+            "setting": setting_list,
+            "rules_mechanics": [
+                f"Time advancement: {scenario.mechanics.time_advancement}",
+                f"Consequence system: {scenario.mechanics.consequence_system}",
+            ],
+            "ongoing_plots": ["Story beginning"],
+            "global_changes": [f"Game started at {datetime.now().isoformat()}"],
+        }
+        if story_label:
+            world_updates.setdefault("global_changes", []).append(f"Story name: {story_label}")
+        chronicle = self.chronicle_manager.persist_world_update(chronicle, world_updates)
+        
+        logger.info(f"Initialized new game for scenario {scenario.id}")
+        return game_state, chronicle
+
     def generate_narrative_text(
         self,
         scenario: Scenario,
@@ -583,18 +628,12 @@ class GameEngine:
             return ""
         sys = (
             "You clean and neutralize image prompts to be PG-13 and safe. "
-            "Enforce: no full nudity, explicit pornographic content, graphic violence, gore, or brand text. "
-            "Keep the scene intent but make it suitable for a general audience. "
-            "Return JSON only: {\"image_prompt\": \"sanitized prompt\"}."
-        )
-        user = (
-            "Sanitize this image prompt for PG-13 use. Include helpful stylistic hints "
-            "like 'realistic, natural color, soft natural light, medium shot, eye level'.\n\n"
-            f"PROMPT:\n{prompt}"
+            "Enforce: no explicit nudity, pornographic content, or graphic violence. "
+            "Remove explicit sexual content and gore. Return only the sanitized prompt."
         )
         messages = [
             {"role": "system", "content": sys},
-            {"role": "user", "content": user},
+            {"role": "user", "content": prompt},
         ]
         resp = self.cheap.generate(
             messages,
@@ -614,51 +653,4 @@ class GameEngine:
                         return data["image_prompt"].strip()
         except Exception:
             pass
-        # Fallback: prefix PG-13 tag without explicit keyword scanning
         return f"PG-13, {prompt.strip()}, realistic, natural color, soft natural light, medium shot, eye level"
-    
-    def initialize_new_game(self, scenario: Scenario, story_label: Optional[str] = None) -> Tuple[GameState, Chronicle]:
-        """Initialize a new game with the given scenario."""
-        
-        # Create initial game state from scenario
-        game_state = copy.deepcopy(scenario.initial_state)
-        
-        # Create initial current scenario for chronicle
-        initial_current = CurrentScenario(
-            location=game_state.current_location,
-            time=game_state.current_time,
-            emotional_context=f"Starting {scenario.name}",
-            npcs_present=list(game_state.npcs.keys()),
-            open_choices=["Look around", "Introduce yourself", "Check the time"],
-            prompt="What would you like to do first?"
-        )
-        
-        # Create chronicle
-        from dm.models import Policy
-        # Always allow inline mature content; no checks
-        policy = Policy(
-            sfw_mode=False,
-            mature_handling="inline_if_allowed",
-            age_verified=True,
-        )
-        
-        chronicle = self.chronicle_manager.create_chronicle(scenario.id, initial_current, policy)
-        
-        # Add initial world state
-        world_updates = {
-            "setting": [f"Location: {game_state.current_location}"] + 
-                      ([scenario.setting.get("world", "Unknown world")] if isinstance(scenario.setting, dict) else []),
-            "rules_mechanics": [
-                f"Time advancement: {scenario.mechanics.time_advancement}",
-                f"Consequence system: {scenario.mechanics.consequence_system}"
-            ],
-            "ongoing_plots": ["Story beginning"],
-            "global_changes": [f"Game started at {datetime.now().isoformat()}"]
-        }
-        if story_label:
-            world_updates.setdefault("global_changes", []).append(f"Story name: {story_label}")
-        
-        chronicle = self.chronicle_manager.persist_world_update(chronicle, world_updates)
-        
-        logger.info(f"Initialized new game for scenario {scenario.id}")
-        return game_state, chronicle
